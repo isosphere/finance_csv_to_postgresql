@@ -1,14 +1,11 @@
 use std::collections::HashMap;
-use std::convert::TryInto;
 
 use clap::{Arg, App};
-use chrono::prelude::*;
 use postgres::{Config, NoTls};
+use postgres::types::Type;
 use regex::Regex;
 use rpassword::prompt_password_stdout;
 use walkdir::{WalkDir, DirEntry};
-
-//extern crate chrono;
 
 fn csv_filter(entry: &DirEntry) -> bool {
     let is_folder = entry.file_type().is_dir();
@@ -129,7 +126,7 @@ fn create_tables(client: &mut postgres::Client) -> Result<usize, postgres::Error
             volume numeric,
             open_interest numeric,
             barsize text not null,
-            constraint bars_daily_pkey primary key (symbol, "timestamp")
+            constraint bars_daily_pkey primary key (symbol, barsize, contract, "timestamp")
         )
     "#)?;
     Ok(0)
@@ -160,9 +157,26 @@ fn main() {
         create_tables(&mut client).unwrap();
     }
 
-    let insert_statement = client.prepare(r#"
-        INSERT INTO bars ("timestamp", symbol, contract, open, high, low, close, volume, open_interest, barsize) 
-        VALUES($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#
+    let insert_day_statement = client.prepare_typed(
+        r#"
+        INSERT INTO bars ("timestamp", symbol, contract, open, high, low, close, volume, barsize) 
+        VALUES(
+            TO_TIMESTAMP($1, 'YYYY-MM-DD'), $2, TO_TIMESTAMP($3, 'YYYY-MM-DD'), CAST($4 AS numeric), CAST($5 AS numeric),
+            CAST($6 AS numeric), CAST($7 AS numeric), CAST($8 AS numeric), $9
+        )
+        ON CONFLICT ON CONSTRAINT bars_daily_pkey DO NOTHING"#,
+        &[Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT]
+    ).unwrap();    
+
+    let insert_minute_statement = client.prepare_typed(
+        r#"
+        INSERT INTO bars ("timestamp", symbol, contract, open, high, low, close, volume, barsize) 
+        VALUES(
+            TO_TIMESTAMP(CONCAT($1, ' ', $2), 'YYYY-MM-DD HH24:MI:SS'), $3, TO_TIMESTAMP($4, 'YYYY-MM-DD'), CAST($5 AS numeric), CAST($6 AS numeric),
+            CAST($7 AS numeric), CAST($8 AS numeric), CAST($9 AS numeric), $10
+        )
+        ON CONFLICT ON CONSTRAINT bars_daily_pkey DO NOTHING"#,
+        &[Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT]
     ).unwrap();    
 
     let target_path = matches.value_of("directory").unwrap();
@@ -170,7 +184,7 @@ fn main() {
     
     let futures_regex = Regex::new(r"^(?i)(?P<root>[@A-Z]+)(?P<month>[FGHJKMNQUVXZ])(?P<year>\d+)$").unwrap();
 
-    struct file_metadata<'a> {
+    struct FileMetadata<'a> {
         symbol: &'a str,
         datasource: &'a str,
         exchange: &'a str,
@@ -205,7 +219,7 @@ fn main() {
             continue;
         }
 
-        let metadata = file_metadata{
+        let metadata = FileMetadata{
             symbol: name_segments[0], 
             datasource: name_segments[1], 
             exchange: name_segments[2], 
@@ -224,40 +238,53 @@ fn main() {
             None => (metadata.symbol, "", 0)
         };
 
-        // create a date object, if relevant
-        let contract_date:Option<chrono::Date<Utc>> = match (contract_month, contract_year) {
-            ("", 0) => None,
+        let contract_date:String = match (contract_month, contract_year) {
+            ("", 0) => String::from(""),
             (month, year) => {
                 let year_number = complete_short_year(&year);
                 let month_number = cme_month_letter_to_number(&month).unwrap();
 
-                Some(Utc.ymd(year_number.try_into().unwrap(), month_number.try_into().unwrap(), 1))
+                format!("{year}-{month:02}-{day:02}", year=year_number, month=month_number, day=1)
             },
         };
 
-        let table_name = format!(
-            "{symbol}_{exchange}_{type}_{field}_{timeframe}",
-            symbol=symbol_root,
-            exchange=metadata.exchange,
-            type=metadata.market,
-            field=metadata.field,
-            timeframe=metadata.timeframe
-        );
+        if metadata.timeframe != "day" && metadata.timeframe != "minute" {
+            println!("Timeframe not supported, skipped: {}", lowercase_file_name);
+            continue;
+        }
 
         let mut reader = csv::Reader::from_path(file_path);
 
-        println!("Error with file, skipped: {}", lowercase_file_name);
-
         match reader.as_mut() {
             Ok(r) => {
-                let headers = r.headers().unwrap();
-                println!("{} {:#?}", table_name, &headers);
-
                 for row_result in r.deserialize() {
                     let row: Record = row_result.unwrap();
 
-                    println!("{:?}", row);
-                    break;
+                    match metadata.timeframe {
+                        "day" => {
+                            client.execute(
+                                &insert_day_statement, 
+                                &[
+                                    &row["Date"], &symbol_root, &contract_date, 
+                                    &row["Open"], &row["High"], &row["Low"], &row["Close"], &row["TotalVolume"],
+                                    &metadata.timeframe
+                                ]
+                            ).unwrap();
+                        },
+                        "minute" => {
+                            client.execute(
+                                &insert_minute_statement,
+                                &[
+                                    &row["Date"], &row["Time"], &symbol_root, &contract_date, 
+                                    &row["Open"], &row["High"], &row["Low"], &row["Close"], &row["TotalVolume"],
+                                    &metadata.timeframe
+                                ]
+                            ).unwrap();
+                        },
+                        _ => {
+                            break; // should be impossible, we checked earlier
+                        }
+                    }
                 }                
             },
             Err(_) => {
