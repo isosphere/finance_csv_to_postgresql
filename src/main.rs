@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 extern crate spmc;
 
 use clap::{Arg, App};
@@ -9,6 +7,7 @@ use regex::Regex;
 use rpassword::prompt_password_stdout;
 use walkdir::{WalkDir, DirEntry};
 
+use std::collections::HashMap;
 use std::thread;
 use std::sync::Arc;
 
