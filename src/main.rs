@@ -345,7 +345,7 @@ fn main() {
             loop {
                 let futures_regex = futures_regex.clone();
 
-                let entry_result = rx.recv();
+                let entry_result = rx.try_recv();
                 match entry_result {
                     Ok(entry_value) => {
                         process_file(
