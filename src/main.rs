@@ -243,8 +243,8 @@ fn process_file(entry_value: DirEntry, futures_regex: Arc<regex::Regex>, client:
             for row_result in r.deserialize() {
                 let row: Record = row_result.unwrap();
 
-                match metadata.timeframe {
-                    "day" => {
+                match metadata {
+                    FileMetadata{timeframe: "day", field: "trade", ..} => {
                         client.execute(
                             &insert_day_statement, 
                             &[
@@ -254,7 +254,7 @@ fn process_file(entry_value: DirEntry, futures_regex: Arc<regex::Regex>, client:
                             ]
                         ).unwrap();
                     },
-                    "minute" => {
+                    FileMetadata{timeframe: "minute", field: "trade", ..} => {
                         client.execute(
                             &insert_minute_statement,
                             &[
