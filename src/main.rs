@@ -1,6 +1,7 @@
 extern crate spmc;
 
 use clap::{Arg, App};
+use indicatif::ProgressBar;
 use postgres::{Config, NoTls};
 use postgres::types::Type;
 use regex::Regex;
@@ -9,7 +10,7 @@ use walkdir::{WalkDir, DirEntry};
 
 use std::collections::HashMap;
 use std::thread;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 fn csv_filter(entry: &DirEntry) -> bool {
     let is_folder = entry.file_type().is_dir();
@@ -306,7 +307,6 @@ fn main() {
     let continuous_flag = Arc::new(matches.is_present("continuous-only"));
 
     println!("Connecting to PostgreSQL {}:{} as user '{}'.", postgresql_host, postgresql_port, postgresql_user);
-
     let postgresql_pass = Arc::new(prompt_password_stdout("Password: ").unwrap());
 
     if matches.is_present("create") {
@@ -336,6 +336,8 @@ fn main() {
     let (mut tx, rx) = spmc::channel();
     let mut thread_handles = Vec::new();
 
+    let bar = Arc::new(Mutex::new(ProgressBar::new(0))); // length will be modified, we don't know it yet
+    
     for _n in 0..max_threads {
         let rx = rx.clone();
 
@@ -346,6 +348,7 @@ fn main() {
         let postgresql_dbname = postgresql_dbname.clone();
         let postgresql_pass = postgresql_pass.clone();      
         let continuous_flag = continuous_flag.clone();  
+        let bar = bar.clone();
 
         thread_handles.push(thread::spawn(move || {
             let postgresql_host = postgresql_host.clone();
@@ -353,7 +356,8 @@ fn main() {
             let postgresql_user = postgresql_user.clone();
             let postgresql_dbname = postgresql_dbname.clone();
             let postgresql_pass = postgresql_pass.clone();
-            let continuous_flag = continuous_flag.clone();  
+            let continuous_flag = continuous_flag.clone();
+            let bar = bar.clone();  
 
             let mut client = prepare_client(
                 postgresql_host, 
@@ -375,6 +379,8 @@ fn main() {
                             &mut client,
                             &continuous_flag
                         );
+                        let bar = bar.lock().unwrap();
+                        bar.inc(1);
                     },
                     Err(_) => {
                         println!("All work complete, thread shutdown.");
@@ -390,6 +396,8 @@ fn main() {
             Ok(e) => {
                 if e.file_type().is_file() {
                     tx.send(e).unwrap();
+                    let bar = bar.lock().unwrap();
+                    bar.inc_length(1);                    
                 } else {
                     continue; // no message required for skipping folders
                 }
