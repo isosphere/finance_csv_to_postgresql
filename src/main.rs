@@ -126,6 +126,8 @@ fn command_usage<'a, 'b>() -> App<'a, 'b> {
     )
     .arg(
         Arg::with_name("continuous-only")
+            .short("o")
+            .long("continuous")
             .takes_value(false)
             .help("Only process continuous contracts for futures - don't process individual contracts")
     )
