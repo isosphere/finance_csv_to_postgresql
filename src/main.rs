@@ -132,6 +132,7 @@ fn create_tables(client: &mut postgres::Client) -> Result<usize, postgres::Error
             "timestamp" timestamp with time zone not null, 
             contract date,
             symbol text collate pg_catalog."default" not null,
+            market text not null,
             open numeric,
             high numeric,
             low numeric,
@@ -141,8 +142,8 @@ fn create_tables(client: &mut postgres::Client) -> Result<usize, postgres::Error
             barsize text not null,
             constraint bars_daily_pkey primary key (symbol, barsize, contract, "timestamp")
         );
-        CREATE INDEX symbol_idx ON bars (symbol);
-        CREATE INDEX symbol_contract_idx ON bars (symbol, contract);
+        CREATE INDEX market_symbol_idx ON bars (market, symbol);
+        CREATE INDEX market_symbol_contract_idx ON bars (market, symbol, contract);
     "#)?;
     Ok(0)
 }
@@ -214,30 +215,35 @@ fn process_file(entry_value: DirEntry, futures_regex: Arc<regex::Regex>, client:
         return;
     }
 
+    if metadata.field != "trade" {
+        println!("Only the trade field will be inserted, skipping other fields: {}", lowercase_file_name);
+        return;
+    }
+
     let mut reader = csv::Reader::from_path(entry_value.path());
 
     match reader.as_mut() {
         Ok(r) => {
             let insert_day_statement = client.prepare_typed(
                 r#"
-                INSERT INTO bars ("timestamp", symbol, contract, open, high, low, close, volume, barsize) 
+                INSERT INTO bars ("timestamp", market, symbol, contract, open, high, low, close, volume, barsize) 
                 VALUES(
-                TO_TIMESTAMP($1, 'YYYY-MM-DD'), $2, TO_TIMESTAMP($3, 'YYYY-MM-DD'), CAST($4 AS numeric), CAST($5 AS numeric),
-                CAST($6 AS numeric), CAST($7 AS numeric), CAST($8 AS numeric), $9
+                    TO_TIMESTAMP($1, 'YYYY-MM-DD'), $2, $3, TO_TIMESTAMP($4, 'YYYY-MM-DD'), CAST($5 AS numeric), CAST($6 AS numeric),
+                    CAST($7 AS numeric), CAST($8 AS numeric), CAST($9 AS numeric), $10
                 )
                 ON CONFLICT ON CONSTRAINT bars_daily_pkey DO NOTHING"#,
-                &[Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT]
+                &[Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT]
             ).unwrap();    
         
             let insert_minute_statement = client.prepare_typed(
                 r#"
-                INSERT INTO bars ("timestamp", symbol, contract, open, high, low, close, volume, barsize) 
+                INSERT INTO bars ("timestamp", market, symbol, contract, open, high, low, close, volume, barsize) 
                 VALUES(
-                TO_TIMESTAMP(CONCAT($1, ' ', $2), 'YYYY-MM-DD HH24:MI:SS'), $3, TO_TIMESTAMP($4, 'YYYY-MM-DD'), CAST($5 AS numeric), CAST($6 AS numeric),
-                CAST($7 AS numeric), CAST($8 AS numeric), CAST($9 AS numeric), $10
+                    TO_TIMESTAMP(CONCAT($1, ' ', $2), 'YYYY-MM-DD HH24:MI:SS'), $3, $4, TO_TIMESTAMP($5, 'YYYY-MM-DD'), CAST($6 AS numeric), CAST($7 AS numeric),
+                    CAST($8 AS numeric), CAST($9 AS numeric), CAST($10 AS numeric), $11
                 )
                 ON CONFLICT ON CONSTRAINT bars_daily_pkey DO NOTHING"#,
-                &[Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT]
+                &[Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT, Type::TEXT]
             ).unwrap();
 
             for row_result in r.deserialize() {
@@ -248,7 +254,7 @@ fn process_file(entry_value: DirEntry, futures_regex: Arc<regex::Regex>, client:
                         client.execute(
                             &insert_day_statement, 
                             &[
-                                &row["Date"], &symbol_root, &contract_date, 
+                                &row["Date"], &metadata.market, &symbol_root, &contract_date, 
                                 &row["Open"], &row["High"], &row["Low"], &row["Close"], &row["TotalVolume"],
                                 &metadata.timeframe
                             ]
@@ -258,7 +264,7 @@ fn process_file(entry_value: DirEntry, futures_regex: Arc<regex::Regex>, client:
                         client.execute(
                             &insert_minute_statement,
                             &[
-                                &row["Date"], &row["Time"], &symbol_root, &contract_date, 
+                                &row["Date"], &row["Time"], &metadata.market, &symbol_root, &contract_date, 
                                 &row["Open"], &row["High"], &row["Low"], &row["Close"], &row["TotalVolume"],
                                 &metadata.timeframe
                             ]
