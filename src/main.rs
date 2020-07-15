@@ -124,6 +124,11 @@ fn command_usage<'a, 'b>() -> App<'a, 'b> {
             .default_value(DEFAULT_THREADS)
             .help("The number of threads (and PostgreSQL connections) to use for insertion.")
     )
+    .arg(
+        Arg::with_name("continuous-only")
+            .takes_value(false)
+            .help("Only process continuous contracts for futures - don't process individual contracts")
+    )
 }
 
 fn create_tables(client: &mut postgres::Client) -> Result<usize, postgres::Error> {
@@ -171,7 +176,7 @@ struct FileMetadata<'a> {
     field: &'a str,
 }
 
-fn process_file(entry_value: DirEntry, futures_regex: Arc<regex::Regex>, client: &mut postgres::Client) {
+fn process_file(entry_value: DirEntry, futures_regex: Arc<regex::Regex>, client: &mut postgres::Client, continuous_flag: &Arc<bool>) {
     let lowercase_file_name = entry_value.path().file_stem().unwrap().to_str().unwrap().to_lowercase();
     let name_segments: Vec<&str> = lowercase_file_name.split('-').collect();
     // 0=symbol, 1=datasource, 2=exchange, 3=type, 4=time, 5=field
@@ -192,11 +197,17 @@ fn process_file(entry_value: DirEntry, futures_regex: Arc<regex::Regex>, client:
 
     // deconstruct CME futures short contract names, ex: @VXJ20 -> @VX, April, 2020.
     let (symbol_root, contract_month, contract_year) = match futures_regex.captures(name_segments[0]) {
-        Some(x) => (
-            x.name("root").unwrap().as_str(), // i.e., root of @VXJ20 is @VX
-            x.name("month").unwrap().as_str(), 
-            x.name("year").unwrap().as_str().parse::<usize>().unwrap()
-        ),
+        Some(x) => {
+            if **continuous_flag {
+                return;
+            } else {
+                (
+                    x.name("root").unwrap().as_str(), // i.e., root of @VXJ20 is @VX
+                    x.name("month").unwrap().as_str(), 
+                    x.name("year").unwrap().as_str().parse::<usize>().unwrap()
+                )
+            }
+        }
         None => (metadata.symbol, "", 0)
     };
 
@@ -290,6 +301,7 @@ fn main() {
     let postgresql_dbname = Arc::new(matches.value_of("database").unwrap().to_string());
     let postgresql_port = Arc::new(matches.value_of("port").unwrap().parse::<u16>().expect(&format!("Invalid port specified: '{}.'", matches.value_of("port").unwrap())));
     let max_threads = matches.value_of("threads").unwrap().parse::<usize>().expect(&format!("Invalid thread count specified: '{}.'", matches.value_of("threads").unwrap()));
+    let continuous_flag = Arc::new(matches.is_present("continuous-only"));
 
     println!("Connecting to PostgreSQL {}:{} as user '{}'.", postgresql_host, postgresql_port, postgresql_user);
 
@@ -330,7 +342,8 @@ fn main() {
         let postgresql_port = postgresql_port.clone();
         let postgresql_user = postgresql_user.clone();
         let postgresql_dbname = postgresql_dbname.clone();
-        let postgresql_pass = postgresql_pass.clone();        
+        let postgresql_pass = postgresql_pass.clone();      
+        let continuous_flag = continuous_flag.clone();  
 
         thread_handles.push(thread::spawn(move || {
             let postgresql_host = postgresql_host.clone();
@@ -338,6 +351,7 @@ fn main() {
             let postgresql_user = postgresql_user.clone();
             let postgresql_dbname = postgresql_dbname.clone();
             let postgresql_pass = postgresql_pass.clone();
+            let continuous_flag = continuous_flag.clone();  
 
             let mut client = prepare_client(
                 postgresql_host, 
@@ -356,7 +370,8 @@ fn main() {
                         process_file(
                             entry_value, 
                             futures_regex, 
-                            &mut client
+                            &mut client,
+                            &continuous_flag
                         );
                     },
                     Err(_) => {
