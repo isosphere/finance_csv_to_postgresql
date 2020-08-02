@@ -134,7 +134,7 @@ fn command_usage<'a, 'b>() -> App<'a, 'b> {
     )
 }
 
-fn create_tables(client: &mut postgres::Client) -> Result<usize, postgres::Error> {
+fn create_tables(client: &mut postgres::Client) -> Result<(), postgres::Error> {
     client.batch_execute(r#"
         CREATE TABLE bars (
             "timestamp" timestamp with time zone not null, 
@@ -152,20 +152,17 @@ fn create_tables(client: &mut postgres::Client) -> Result<usize, postgres::Error
         );
         CREATE INDEX market_symbol_idx ON bars (market, symbol);
         CREATE INDEX market_symbol_contract_idx ON bars (market, symbol, contract);
-    "#)?;
-    Ok(0)
+    "#)
 }
 
 fn prepare_client(host: Arc<String>, port: Arc<u16>, user: Arc<String>, dbname: Arc<String>, password: Arc<String>) -> postgres::Client {
-    let client = Config::new()
+    Config::new()
         .host(&host)
         .port(*port)
         .user(&user)
         .dbname(&dbname)
         .password(password.to_string())
-        .connect(NoTls).unwrap();
-
-    client
+        .connect(NoTls).unwrap()
 }
 
 type Record = HashMap<String, String>;
@@ -302,8 +299,8 @@ fn main() {
     let postgresql_host = Arc::new(matches.value_of("host").unwrap().to_string());
     let postgresql_user = Arc::new(matches.value_of("user").unwrap().to_string());
     let postgresql_dbname = Arc::new(matches.value_of("database").unwrap().to_string());
-    let postgresql_port = Arc::new(matches.value_of("port").unwrap().parse::<u16>().expect(&format!("Invalid port specified: '{}.'", matches.value_of("port").unwrap())));
-    let max_threads = matches.value_of("threads").unwrap().parse::<usize>().expect(&format!("Invalid thread count specified: '{}.'", matches.value_of("threads").unwrap()));
+    let postgresql_port = Arc::new(matches.value_of("port").unwrap().parse::<u16>().unwrap_or_else(|_| panic!("Invalid port specified: '{}.'", matches.value_of("port").unwrap())));
+    let max_threads = matches.value_of("threads").unwrap().parse::<usize>().unwrap_or_else(|_| panic!("Invalid thread count specified: '{}.'", matches.value_of("threads").unwrap()));
     let continuous_flag = Arc::new(matches.is_present("continuous-only"));
 
     println!("Connecting to PostgreSQL {}:{} as user '{}'.", postgresql_host, postgresql_port, postgresql_user);
@@ -331,12 +328,12 @@ fn main() {
     let futures_regex = std::sync::Arc::new(Regex::new(r"^(?i)(?P<root>[@A-Z]+)(?P<month>[FGHJKMNQUVXZ])(?P<year>\d+)$").unwrap());
 
     let target_path = matches.value_of("directory").unwrap();
-    println!("Transversing path '{}'", target_path);
+    println!("Traversing path '{}'", target_path);
 
     let (mut tx, rx) = spmc::channel();
     let mut thread_handles = Vec::new();
 
-    let bar = Arc::new(Mutex::new(ProgressBar::new(0))); // length will be modified, we don't know it yet
+    let progress = Arc::new(Mutex::new(ProgressBar::new(0))); // length will be modified, we don't know it yet
     
     for _n in 0..max_threads {
         let rx = rx.clone();
@@ -348,7 +345,7 @@ fn main() {
         let postgresql_dbname = postgresql_dbname.clone();
         let postgresql_pass = postgresql_pass.clone();      
         let continuous_flag = continuous_flag.clone();  
-        let bar = bar.clone();
+        let progress = progress.clone();
 
         thread_handles.push(thread::spawn(move || {
             let postgresql_host = postgresql_host.clone();
@@ -357,7 +354,7 @@ fn main() {
             let postgresql_dbname = postgresql_dbname.clone();
             let postgresql_pass = postgresql_pass.clone();
             let continuous_flag = continuous_flag.clone();
-            let bar = bar.clone();  
+            let progress = progress.clone();  
 
             let mut client = prepare_client(
                 postgresql_host, 
@@ -379,8 +376,8 @@ fn main() {
                             &mut client,
                             &continuous_flag
                         );
-                        let bar = bar.lock().unwrap();
-                        bar.inc(1);
+                        let progress = progress.lock().unwrap();
+                        progress.inc(1);
                     },
                     Err(_) => {
                         println!("All work complete, thread shutdown.");
@@ -396,8 +393,8 @@ fn main() {
             Ok(e) => {
                 if e.file_type().is_file() {
                     tx.send(e).unwrap();
-                    let bar = bar.lock().unwrap();
-                    bar.inc_length(1);                    
+                    let progress = progress.lock().unwrap();
+                    progress.inc_length(1);
                 } else {
                     continue; // no message required for skipping folders
                 }
